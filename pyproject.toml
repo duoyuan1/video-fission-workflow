@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-fission-workflow"
+version = "0.1.0"
+description = "Lightweight workflow CLI for video analysis, content fission, script, asset, storyboard, and QA pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "OpenAI Codex" }
+]
+dependencies = []
+
+[project.scripts]
+video-fission-workflow = "workflow.cli:main"
+
+[tool.setuptools]
+packages = ["workflow"]

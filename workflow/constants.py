@@ -1,0 +1,91 @@
+"""Shared constants for the workflow scaffold."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class StageDefinition:
+    name: str
+    label: str
+    description: str
+    input_summary: str
+    output_summary: str
+    command: str
+    output_dir: str
+    json_filename: str
+    markdown_filename: str
+
+
+STAGES: list[StageDefinition] = [
+    StageDefinition(
+        name="video_analyzer",
+        label="Video Analyzer",
+        description="Read the source video and produce a structured content summary.",
+        input_summary="Source video path plus project-level workflow config.",
+        output_summary="Structured video summary, roles, scenes, motions, and highlights.",
+        command="analyze",
+        output_dir="01_video_analysis",
+        json_filename="video_summary.json",
+        markdown_filename="video_summary.md",
+    ),
+    StageDefinition(
+        name="direction_planner",
+        label="Direction Planner",
+        description="Turn the video summary into content directions and prioritization.",
+        input_summary="Video analysis output and strategy preferences.",
+        output_summary="Direction options, target audience, hook, mood curve, and recommendation.",
+        command="plan-directions",
+        output_dir="02_direction_planning",
+        json_filename="directions.json",
+        markdown_filename="directions.md",
+    ),
+    StageDefinition(
+        name="script_generator",
+        label="Script Generator",
+        description="Create a chosen裂变方向's script package from the planning output.",
+        input_summary="Selected direction plus prior analysis artifacts.",
+        output_summary="Series hook, episode arc, and structured markdown script.",
+        command="gen-script",
+        output_dir="03_scripts",
+        json_filename="script.json",
+        markdown_filename="剧本.md",
+    ),
+    StageDefinition(
+        name="asset_planner",
+        label="Asset Planner",
+        description="Plan characters, scenes, props, and reusable assets for production.",
+        input_summary="Approved script and style rules.",
+        output_summary="Asset registry with C/S/P IDs and prompt-ready material notes.",
+        command="gen-assets",
+        output_dir="04_asset_library",
+        json_filename="assets.json",
+        markdown_filename="素材清单.md",
+    ),
+    StageDefinition(
+        name="storyboard_generator",
+        label="Storyboard Generator",
+        description="Generate per-episode storyboard prompts for downstream video models.",
+        input_summary="Script plus asset registry.",
+        output_summary="Episode storyboard prompts, upload slot tables, and end-frame notes.",
+        command="gen-storyboards",
+        output_dir="05_storyboards",
+        json_filename="storyboards.json",
+        markdown_filename="分镜总览.md",
+    ),
+    StageDefinition(
+        name="qa_reviewer",
+        label="QA Reviewer",
+        description="Check consistency across script, assets, storyboards, and continuity.",
+        input_summary="All prior artifacts.",
+        output_summary="QA report covering missing references, continuity, and readiness.",
+        command="qa",
+        output_dir="06_qa",
+        json_filename="qa_report.json",
+        markdown_filename="qa_report.md",
+    ),
+]
+
+STAGE_BY_COMMAND = {stage.command: stage for stage in STAGES}
+STAGE_BY_NAME = {stage.name: stage for stage in STAGES}
