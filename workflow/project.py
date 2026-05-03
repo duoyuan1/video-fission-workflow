@@ -36,6 +36,7 @@ REQUEST_FILE = "request.md"
 RESPONSE_TEMPLATE_FILE = "response_template.json"
 RAW_RESPONSE_FILE = "raw_response.json"
 PROVIDER_RESPONSE_FILE = "provider_response.json"
+REFERENCE_ASSETS_FILE = "reference_assets.json"
 
 
 class WorkflowError(RuntimeError):
@@ -77,6 +78,7 @@ def init_project(project_name: str, source_video: str, notes: str = "") -> Path:
         raise WorkflowError(f"Project already exists: {root}")
 
     (root / "source").mkdir(parents=True)
+    (root / "source" / "assets").mkdir(parents=True)
     (root / "outputs").mkdir(parents=True)
 
     config = ProjectConfig(
@@ -94,6 +96,7 @@ def init_project(project_name: str, source_video: str, notes: str = "") -> Path:
     for stage in STAGES:
         (root / "outputs" / stage.output_dir).mkdir(parents=True, exist_ok=True)
 
+    write_json(root / "source" / REFERENCE_ASSETS_FILE, {"references": []})
     readme = build_project_readme(config.project_name, source_video)
     (root / "README.md").write_text(readme, encoding="utf-8")
 
@@ -106,6 +109,8 @@ def build_project_readme(project_name: str, source_video: str) -> str:
         "This workflow project was created by `video-fission-workflow init`.\n\n"
         "## Source\n\n"
         f"- Source video: `{source_video}`\n\n"
+        "- Reference assets manifest: `source/reference_assets.json`\n"
+        "- Local reference asset folder: `source/assets/`\n\n"
         "## Stages\n\n"
         + "\n".join(f"- `{stage.command}` -> {stage.label}" for stage in STAGES)
         + "\n"

@@ -83,18 +83,21 @@ def prepare_request(project_root: Path, command: str, config: dict[str, Any], di
     elif command == "gen-assets":
         analysis = load_artifact_payload(project_root, "video_analyzer")
         script = load_artifact_payload(project_root, "script_generator")
-        prepared = prepare_asset_planning(config, analysis, script)
+        reference_library = load_reference_library(project_root)
+        prepared = prepare_asset_planning(config, analysis, script, reference_library)
     elif command == "gen-storyboards":
         script = load_artifact_payload(project_root, "script_generator")
         assets = load_artifact_payload(project_root, "asset_planner")
-        prepared = prepare_storyboard_generation(config, script, assets)
+        reference_library = load_reference_library(project_root)
+        prepared = prepare_storyboard_generation(config, script, assets, reference_library)
     elif command == "qa":
         analysis = load_artifact_payload(project_root, "video_analyzer")
         directions = load_artifact_payload(project_root, "direction_planner")
         script = load_artifact_payload(project_root, "script_generator")
         assets = load_artifact_payload(project_root, "asset_planner")
         storyboards = load_artifact_payload(project_root, "storyboard_generator")
-        prepared = prepare_qa_review(config, analysis, directions, script, assets, storyboards)
+        reference_library = load_reference_library(project_root)
+        prepared = prepare_qa_review(config, analysis, directions, script, assets, storyboards, reference_library)
     else:
         raise NodeValidationError(f"Stage `{command}` does not support request preparation.")
 
@@ -125,18 +128,21 @@ def finalize_response(
     if command == "gen-assets":
         analysis = load_artifact_payload(project_root, "video_analyzer")
         script = load_artifact_payload(project_root, "script_generator")
-        return finalize_asset_planning(config, analysis, script, response)
+        reference_library = load_reference_library(project_root)
+        return finalize_asset_planning(config, analysis, script, response, reference_library)
     if command == "gen-storyboards":
         script = load_artifact_payload(project_root, "script_generator")
         assets = load_artifact_payload(project_root, "asset_planner")
-        return finalize_storyboard_generation(config, script, assets, response)
+        reference_library = load_reference_library(project_root)
+        return finalize_storyboard_generation(config, script, assets, response, reference_library)
     if command == "qa":
         analysis = load_artifact_payload(project_root, "video_analyzer")
         directions = load_artifact_payload(project_root, "direction_planner")
         script = load_artifact_payload(project_root, "script_generator")
         assets = load_artifact_payload(project_root, "asset_planner")
         storyboards = load_artifact_payload(project_root, "storyboard_generator")
-        return finalize_qa_review(config, analysis, directions, script, assets, storyboards, response)
+        reference_library = load_reference_library(project_root)
+        return finalize_qa_review(config, analysis, directions, script, assets, storyboards, response, reference_library)
     raise NodeValidationError(f"Stage `{command}` does not support response finalization.")
 
 
@@ -147,6 +153,52 @@ def load_artifact_payload(project_root: Path, stage_name: str) -> dict[str, Any]
         raise NodeValidationError(f"Required artifact not found: {artifact_path}")
     artifact = _read_json(artifact_path)
     return _require_dict(artifact.get("payload"), f"{stage_name}.payload")
+
+
+def load_reference_library(project_root: Path) -> dict[str, Any]:
+    path = project_root / "source" / "reference_assets.json"
+    if not path.exists():
+        return {"references": []}
+
+    data = _require_dict(_read_json(path), "reference_assets")
+    references = _require_list(data.get("references", []), "reference_assets.references")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(references):
+        reference = _require_dict(item, f"reference_assets.references[{index}]")
+        normalized.append(
+            {
+                "reference_id": _require_str(
+                    reference.get("reference_id"), f"reference_assets.references[{index}].reference_id"
+                ),
+                "name": _require_str(reference.get("name"), f"reference_assets.references[{index}].name"),
+                "category": _require_str(reference.get("category"), f"reference_assets.references[{index}].category"),
+                "source_type": _require_str(
+                    reference.get("source_type"), f"reference_assets.references[{index}].source_type"
+                ),
+                "source": _require_str(reference.get("source"), f"reference_assets.references[{index}].source"),
+                "usage_notes": _require_str(
+                    reference.get("usage_notes"), f"reference_assets.references[{index}].usage_notes"
+                ),
+                "must_keep": _require_str_list(
+                    reference.get("must_keep", []), f"reference_assets.references[{index}].must_keep"
+                ),
+            }
+        )
+    return {"references": normalized}
+
+
+def render_reference_library_summary(reference_library: dict[str, Any]) -> str:
+    references = reference_library["references"]
+    if not references:
+        return "- No external reference assets were registered for this project."
+    lines = []
+    for item in references:
+        must_keep = " / ".join(item["must_keep"]) if item["must_keep"] else "None"
+        lines.append(
+            f"- {item['reference_id']} | {item['category']} | {item['name']} | "
+            f"{item['source_type']} -> {item['source']} | keep: {must_keep} | notes: {item['usage_notes']}"
+        )
+    return "\n".join(lines)
 
 
 def prepare_video_analysis(config: dict[str, Any]) -> PreparedRequest:
@@ -850,7 +902,10 @@ def render_script_markdown(config: dict[str, Any], payload: dict[str, Any]) -> s
     return "\n".join(lines)
 
 
-def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], script: dict[str, Any]) -> PreparedRequest:
+def prepare_asset_planning(
+    config: dict[str, Any], analysis: dict[str, Any], script: dict[str, Any], reference_library: dict[str, Any]
+) -> PreparedRequest:
+    reference_summary = render_reference_library_summary(reference_library)
     prompt = f"""# Asset Planning Request
 
 你是“AI 视频素材库规划”专家。现在你已经有视频解析和裂变剧本，请不要再改写剧情，而是把它们转成可执行的素材库规划。
@@ -874,17 +929,24 @@ def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], scr
 - Visual emphasis: {' / '.join(script["production_notes"]["visual_emphasis"])}
 - Continuity rules: {' / '.join(script["production_notes"]["continuity_rules"])}
 
+## External Reference Library
+
+{reference_summary}
+
 ## Planning goals
 
 1. 产出统一风格前缀和素材一致性规则。
 2. 将素材拆成角色 C、场景 S、道具 P 三类。
-3. 每项素材都要写明用途、优先级、视觉描述、生成提示词。
-4. 给出“必须先生成”的最小素材集，方便开工。
+3. 对于用户已提供参考素材的人物、表情包、IP 形象、固定道具，不要把它们当成纯原创资产，必须标注引用方式。
+4. 每项素材都要写明用途、优先级、视觉描述、生成提示词，以及素材来源策略。
+5. 给出“必须先生成”的最小素材集，方便开工。
 
 ## Output requirements
 
 - 严格输出 JSON。
 - `asset_id` 必须使用 `C` / `S` / `P` 前缀。
+- `sourcing_mode` 只能是 `generate_fresh` / `generate_from_reference` / `use_reference_directly`。
+- 如果使用参考素材，`reference_ids` 必须引用 External Reference Library 里的 `reference_id`。
 - `generation_prompt` 用适合图像模型的完整描述。
 - `must_generate_first` 只能引用已定义的素材 ID。
 """
@@ -903,6 +965,9 @@ def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], scr
                 "name": "",
                 "purpose": "",
                 "priority": "must",
+                "sourcing_mode": "generate_fresh",
+                "reference_ids": [],
+                "reference_notes": "",
                 "visual_description": "",
                 "generation_prompt": "",
             }
@@ -913,6 +978,9 @@ def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], scr
                 "name": "",
                 "purpose": "",
                 "priority": "must",
+                "sourcing_mode": "generate_fresh",
+                "reference_ids": [],
+                "reference_notes": "",
                 "visual_description": "",
                 "generation_prompt": "",
             }
@@ -923,6 +991,9 @@ def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], scr
                 "name": "",
                 "purpose": "",
                 "priority": "must",
+                "sourcing_mode": "generate_fresh",
+                "reference_ids": [],
+                "reference_notes": "",
                 "visual_description": "",
                 "generation_prompt": "",
             }
@@ -940,7 +1011,11 @@ def prepare_asset_planning(config: dict[str, Any], analysis: dict[str, Any], scr
 
 
 def finalize_asset_planning(
-    config: dict[str, Any], analysis: dict[str, Any], script: dict[str, Any], response: dict[str, Any]
+    config: dict[str, Any],
+    analysis: dict[str, Any],
+    script: dict[str, Any],
+    response: dict[str, Any],
+    reference_library: dict[str, Any],
 ) -> tuple[StageArtifact, str]:
     style_guide = _require_dict(response.get("style_guide"), "style_guide")
     characters = _require_list(response.get("characters"), "characters")
@@ -951,6 +1026,8 @@ def finalize_asset_planning(
     direction_id = _require_str(response.get("direction_id"), "direction_id")
     if direction_id != script["direction_id"]:
         raise NodeValidationError("direction_id in asset response must match script direction_id.")
+    available_reference_ids = {item["reference_id"] for item in reference_library["references"]}
+    allowed_sourcing_modes = {"generate_fresh", "generate_from_reference", "use_reference_directly"}
 
     def normalize_assets(items: list[Any], prefix: str, path: str) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
@@ -959,12 +1036,26 @@ def finalize_asset_planning(
             asset_id = _require_str(asset.get("asset_id"), f"{path}[{index}].asset_id")
             if not asset_id.startswith(prefix):
                 raise NodeValidationError(f"{path}[{index}].asset_id must start with `{prefix}`.")
+            sourcing_mode = _require_str(asset.get("sourcing_mode"), f"{path}[{index}].sourcing_mode")
+            if sourcing_mode not in allowed_sourcing_modes:
+                raise NodeValidationError(
+                    f"{path}[{index}].sourcing_mode must be one of generate_fresh / generate_from_reference / use_reference_directly."
+                )
+            reference_ids = _require_str_list(asset.get("reference_ids", []), f"{path}[{index}].reference_ids")
+            for reference_id in reference_ids:
+                if reference_id not in available_reference_ids:
+                    raise NodeValidationError(f"{path}[{index}] references undefined reference asset `{reference_id}`.")
+            if sourcing_mode != "generate_fresh" and not reference_ids:
+                raise NodeValidationError(f"{path}[{index}].reference_ids must not be empty for `{sourcing_mode}`.")
             normalized.append(
                 {
                     "asset_id": asset_id,
                     "name": _require_str(asset.get("name"), f"{path}[{index}].name"),
                     "purpose": _require_str(asset.get("purpose"), f"{path}[{index}].purpose"),
                     "priority": _require_str(asset.get("priority"), f"{path}[{index}].priority"),
+                    "sourcing_mode": sourcing_mode,
+                    "reference_ids": reference_ids,
+                    "reference_notes": _require_str(asset.get("reference_notes"), f"{path}[{index}].reference_notes"),
                     "visual_description": _require_str(
                         asset.get("visual_description"), f"{path}[{index}].visual_description"
                     ),
@@ -1005,6 +1096,7 @@ def finalize_asset_planning(
             "working_title": analysis["source_overview"]["working_title"],
             "visual_style": analysis["source_overview"]["visual_style"],
         },
+        "reference_library": reference_library["references"],
         "style_guide": {
             "visual_style": _require_str(style_guide.get("visual_style"), "style_guide.visual_style"),
             "style_prefix": _require_str(style_guide.get("style_prefix"), "style_guide.style_prefix"),
@@ -1042,9 +1134,23 @@ def render_asset_markdown(config: dict[str, Any], payload: dict[str, Any]) -> st
         f"- 视觉风格：{payload['style_guide']['visual_style']}",
         f"- 风格前缀：{payload['style_guide']['style_prefix']}",
         "",
-        "## 风格规则",
-        "",
     ]
+    if payload["reference_library"]:
+        lines.extend(["## 外部参考素材", ""])
+        for item in payload["reference_library"]:
+            must_keep = " / ".join(item["must_keep"]) if item["must_keep"] else "无"
+            lines.extend(
+                [
+                    f"### {item['reference_id']} {item['name']}",
+                    "",
+                    f"- 类别：{item['category']}",
+                    f"- 来源：{item['source_type']} -> {item['source']}",
+                    f"- 保留要点：{must_keep}",
+                    f"- 使用说明：{item['usage_notes']}",
+                    "",
+                ]
+            )
+    lines.extend(["## 风格规则", ""])
     lines.extend(f"- 配色：{item}" for item in payload["style_guide"]["palette"])
     lines.extend(f"- 渲染备注：{item}" for item in payload["style_guide"]["rendering_notes"])
     lines.extend(f"- 一致性规则：{item}" for item in payload["style_guide"]["consistency_rules"])
@@ -1058,6 +1164,9 @@ def render_asset_markdown(config: dict[str, Any], payload: dict[str, Any]) -> st
                     "",
                     f"- 用途：{item['purpose']}",
                     f"- 优先级：{item['priority']}",
+                    f"- 素材来源：{item['sourcing_mode']}",
+                    f"- 参考素材：{', '.join(item['reference_ids']) if item['reference_ids'] else '无'}",
+                    f"- 参考备注：{item['reference_notes']}",
                     f"- 视觉描述：{item['visual_description']}",
                     "",
                     "```text",
@@ -1079,7 +1188,17 @@ def render_asset_markdown(config: dict[str, Any], payload: dict[str, Any]) -> st
     return "\n".join(lines)
 
 
-def prepare_storyboard_generation(config: dict[str, Any], script: dict[str, Any], assets: dict[str, Any]) -> PreparedRequest:
+def prepare_storyboard_generation(
+    config: dict[str, Any], script: dict[str, Any], assets: dict[str, Any], reference_library: dict[str, Any]
+) -> PreparedRequest:
+    reference_summary = render_reference_library_summary(reference_library)
+    asset_source_lines = []
+    for item in assets["characters"] + assets["scenes"] + assets["props"]:
+        references = ", ".join(item["reference_ids"]) if item["reference_ids"] else "none"
+        asset_source_lines.append(
+            f"- {item['asset_id']} {item['name']} | {item['sourcing_mode']} | refs: {references} | notes: {item['reference_notes']}"
+        )
+    asset_source_summary = "\n".join(asset_source_lines)
     prompt = f"""# Storyboard Generation Request
 
 你是“Seedance / AI 视频分镜规划”专家。请基于已经完成的裂变剧本和素材库，生成每一集可执行的分镜提示词。
@@ -1106,17 +1225,27 @@ def prepare_storyboard_generation(config: dict[str, Any], script: dict[str, Any]
 - Available scene assets: {' / '.join(item["asset_id"] for item in assets["scenes"])}
 - Available prop assets: {' / '.join(item["asset_id"] for item in assets["props"])}
 
+## Asset Source Rules
+
+{asset_source_summary}
+
+## External Reference Library
+
+{reference_summary}
+
 ## Generation goals
 
 1. 每集输出上传素材表、15 秒时间轴 prompt、尾帧描述。
 2. 第 2 集开始，默认用 `将@视频1延长15s` 串联。
 3. Prompt 要具体到镜头、动作、情绪和声音。
 4. 素材引用必须只使用素材库里已定义的 ID。
+5. 如果某项素材依赖参考图，上传表里要明确写出 `reference_ids`，提醒执行时一并上传。
 
 ## Output requirements
 
 - 严格输出 JSON。
 - `episodes` 数量必须和剧本一致。
+- `upload_slots[].material_type` 只能是 `asset` 或 `reference`。
 - `timeline_prompt` 必须包含 0-3 秒到 12-15 秒的分段。
 - 第 2 集及之后若使用续接，需在 `timeline_prompt` 中体现 `将@视频1延长15s`。
 """
@@ -1131,7 +1260,9 @@ def prepare_storyboard_generation(config: dict[str, Any], script: dict[str, Any]
                 "upload_slots": [
                     {
                         "slot": "@图片1",
+                        "material_type": "asset",
                         "asset_id": "C01",
+                        "reference_ids": [],
                         "usage": "",
                     }
                 ],
@@ -1146,7 +1277,11 @@ def prepare_storyboard_generation(config: dict[str, Any], script: dict[str, Any]
 
 
 def finalize_storyboard_generation(
-    config: dict[str, Any], script: dict[str, Any], assets: dict[str, Any], response: dict[str, Any]
+    config: dict[str, Any],
+    script: dict[str, Any],
+    assets: dict[str, Any],
+    response: dict[str, Any],
+    reference_library: dict[str, Any],
 ) -> tuple[StageArtifact, str]:
     direction_id = _require_str(response.get("direction_id"), "direction_id")
     if direction_id != script["direction_id"]:
@@ -1159,6 +1294,10 @@ def finalize_storyboard_generation(
             f"episodes must contain exactly {expected_episode_count} items for the storyboard stage."
         )
     all_asset_ids = {item["asset_id"] for item in assets["characters"] + assets["scenes"] + assets["props"]}
+    asset_reference_map = {
+        item["asset_id"]: set(item["reference_ids"]) for item in assets["characters"] + assets["scenes"] + assets["props"]
+    }
+    available_reference_ids = {item["reference_id"] for item in reference_library["references"]}
     normalized_episodes: list[dict[str, Any]] = []
     for index, item in enumerate(episodes):
         episode = _require_dict(item, f"episodes[{index}]")
@@ -1172,10 +1311,35 @@ def finalize_storyboard_generation(
             asset_id = _require_str(slot.get("asset_id"), f"episodes[{index}].upload_slots[{slot_index}].asset_id")
             if asset_id not in all_asset_ids:
                 raise NodeValidationError(f"episodes[{index}] references undefined asset `{asset_id}`.")
+            material_type = _require_str(
+                slot.get("material_type"), f"episodes[{index}].upload_slots[{slot_index}].material_type"
+            )
+            if material_type not in {"asset", "reference"}:
+                raise NodeValidationError(
+                    f"episodes[{index}].upload_slots[{slot_index}].material_type must be `asset` or `reference`."
+                )
+            reference_ids = _require_str_list(
+                slot.get("reference_ids", []), f"episodes[{index}].upload_slots[{slot_index}].reference_ids"
+            )
+            for reference_id in reference_ids:
+                if reference_id not in available_reference_ids:
+                    raise NodeValidationError(
+                        f"episodes[{index}].upload_slots[{slot_index}] references undefined reference `{reference_id}`."
+                    )
+            if material_type == "reference" and not reference_ids:
+                raise NodeValidationError(
+                    f"episodes[{index}].upload_slots[{slot_index}].reference_ids must not be empty for reference slots."
+                )
+            if reference_ids and not set(reference_ids).issubset(asset_reference_map[asset_id]):
+                raise NodeValidationError(
+                    f"episodes[{index}].upload_slots[{slot_index}] includes reference_ids not bound to asset `{asset_id}`."
+                )
             normalized_slots.append(
                 {
                     "slot": _require_str(slot.get("slot"), f"episodes[{index}].upload_slots[{slot_index}].slot"),
+                    "material_type": material_type,
                     "asset_id": asset_id,
+                    "reference_ids": reference_ids,
                     "usage": _require_str(slot.get("usage"), f"episodes[{index}].upload_slots[{slot_index}].usage"),
                 }
             )
@@ -1243,12 +1407,15 @@ def render_storyboard_markdown(config: dict[str, Any], payload: dict[str, Any]) 
             [
                 f"### E{episode['episode_number']:02d} {episode['title']}",
                 "",
-                "| 上传位置 | 素材ID | 用途 |",
-                "|---|---|---|",
+                "| 上传位置 | 类型 | 素材ID | 参考ID | 用途 |",
+                "|---|---|---|---|---|",
             ]
         )
         for slot in episode["upload_slots"]:
-            lines.append(f"| {slot['slot']} | {slot['asset_id']} | {slot['usage']} |")
+            reference_ids = ", ".join(slot["reference_ids"]) if slot["reference_ids"] else "-"
+            lines.append(
+                f"| {slot['slot']} | {slot['material_type']} | {slot['asset_id']} | {reference_ids} | {slot['usage']} |"
+            )
         lines.extend(
             [
                 "",
@@ -1271,11 +1438,14 @@ def render_storyboard_episode_markdown(series_title: str, episode: dict[str, Any
         "",
         "## 素材上传清单",
         "",
-        "| 上传位置 | 素材ID | 用途 |",
-        "|---|---|---|",
+        "| 上传位置 | 类型 | 素材ID | 参考ID | 用途 |",
+        "|---|---|---|---|---|",
     ]
     for slot in episode["upload_slots"]:
-        lines.append(f"| {slot['slot']} | {slot['asset_id']} | {slot['usage']} |")
+        reference_ids = ", ".join(slot["reference_ids"]) if slot["reference_ids"] else "-"
+        lines.append(
+            f"| {slot['slot']} | {slot['material_type']} | {slot['asset_id']} | {reference_ids} | {slot['usage']} |"
+        )
     lines.extend(
         [
             "",
@@ -1309,7 +1479,11 @@ def prepare_qa_review(
     script: dict[str, Any],
     assets: dict[str, Any],
     storyboards: dict[str, Any],
+    reference_library: dict[str, Any],
 ) -> PreparedRequest:
+    referenced_asset_count = sum(
+        1 for item in assets["characters"] + assets["scenes"] + assets["props"] if item["reference_ids"]
+    )
     prompt = f"""# QA Review Request
 
 你是“AI 视频生产 QA 审查”专家。现在你需要审查整条链路是否可执行：视频解析、方向规划、裂变剧本、素材库、分镜是否一致。
@@ -1325,14 +1499,17 @@ def prepare_qa_review(
 - Selected direction: {directions["selected_direction_id"]}
 - Series title: {script["series_title"]}
 - Asset count: {len(assets["characters"]) + len(assets["scenes"]) + len(assets["props"])}
+- Reference assets registered: {len(reference_library["references"])}
+- Assets depending on references: {referenced_asset_count}
 - Storyboard episodes: {len(storyboards["episodes"])}
 
 ## Review goals
 
 1. 检查 must_keep 事实有没有被破坏。
 2. 检查剧本、素材、分镜之间的素材引用和叙事连贯性。
-3. 标出高/中/低风险问题。
-4. 给出是否可进入实际生成阶段的判断。
+3. 检查所有依赖参考图的素材，是否在分镜上传表中明确给出了 reference_ids。
+4. 标出高/中/低风险问题。
+5. 给出是否可进入实际生成阶段的判断。
 
 ## Output requirements
 
@@ -1377,6 +1554,7 @@ def finalize_qa_review(
     assets: dict[str, Any],
     storyboards: dict[str, Any],
     response: dict[str, Any],
+    reference_library: dict[str, Any],
 ) -> tuple[StageArtifact, str]:
     overall_status = _require_str(response.get("overall_status"), "overall_status")
     if overall_status not in {"pass", "needs_revision", "fail"}:
@@ -1396,6 +1574,7 @@ def finalize_qa_review(
             "direction_id": directions["selected_direction_id"],
             "series_title": script["series_title"],
             "asset_count": len(assets["characters"]) + len(assets["scenes"]) + len(assets["props"]),
+            "reference_asset_count": len(reference_library["references"]),
             "storyboard_episode_count": len(storyboards["episodes"]),
         },
         "checklist": [

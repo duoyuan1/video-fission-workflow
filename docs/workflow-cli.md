@@ -22,6 +22,8 @@ projects/<slug>/
   state.json
   schemas.json
   source/
+    assets/
+    reference_assets.json
   outputs/
     01_video_analysis/
     02_direction_planning/
@@ -44,6 +46,30 @@ Create a project:
 
 ```bash
 video-fission-workflow init "司马光裂变" --source-video "./input.mp4"
+```
+
+For reference-driven assets such as meme characters, iconic props, or fixed IP faces:
+
+1. Put the files under `projects/<slug>/source/assets/`
+2. Fill `projects/<slug>/source/reference_assets.json`
+3. Run `gen-assets` and `gen-storyboards` as usual
+
+Suggested `reference_assets.json` shape:
+
+```json
+{
+  "references": [
+    {
+      "reference_id": "R01",
+      "name": "Sad Frog Meme",
+      "category": "character",
+      "source_type": "image",
+      "source": "source/assets/sad-frog.png",
+      "usage_notes": "Use as face and expression reference. Do not redesign into another character.",
+      "must_keep": ["green frog face", "downturned eyes", "flat meme composition"]
+    }
+  ]
+}
 ```
 
 Check status:
@@ -130,6 +156,7 @@ video-fission-workflow analyze "司马光裂变" --model "$OPENAI_MODEL" --disab
 - Real request/response flow for all six stages
 - Direct OpenAI-compatible API execution for all six stages
 - Per-episode storyboard markdown export under `05_storyboards/`
+- Reference-aware asset planning and storyboard upload tables
 
 ## What comes next
 
