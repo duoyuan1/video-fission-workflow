@@ -6,10 +6,12 @@ import argparse
 from pathlib import Path
 from typing import Callable
 
-from workflow.constants import STAGES
+from workflow.constants import STAGES, STAGE_BY_COMMAND
+from workflow.env_loader import load_dotenv
 from workflow.project import (
     WorkflowError,
     init_project,
+    load_state,
     project_path,
     run_stage,
     status_table,
@@ -104,6 +106,29 @@ def build_parser() -> argparse.ArgumentParser:
                 "--response-file",
                 help="Path to a model-generated JSON response for this stage. Without it, the command prepares request files only.",
             )
+        if stage.command == "render-videos":
+            stage_parser.add_argument(
+                "--model",
+                help="Optional render model override. Falls back to RENDER_MODEL or stage-specific .env settings.",
+            )
+            stage_parser.add_argument(
+                "--api-base",
+                help="Optional render API base override. Falls back to RENDER_API_BASE or stage-specific .env settings.",
+            )
+            stage_parser.add_argument(
+                "--api-key",
+                help="Optional render API key override. Falls back to RENDER_API_KEY or stage-specific .env settings.",
+            )
+            stage_parser.add_argument(
+                "--timeout-seconds",
+                type=int,
+                default=180,
+                help="HTTP timeout in seconds for direct render provider calls.",
+            )
+            stage_parser.add_argument(
+                "--response-file",
+                help="Path to a render-result JSON manifest. Without it, the command prepares render request files only.",
+            )
         if stage.command == "gen-script":
             stage_parser.add_argument(
                 "--direction-id",
@@ -149,18 +174,26 @@ def make_stage_handler(command: str) -> Callable[[argparse.Namespace], int]:
             timeout_seconds=timeout_seconds,
             use_json_mode=use_json_mode,
         )
-        if response_file is None and model is None and command in {
+        if response_file is None and command in {
             "analyze",
             "plan-directions",
             "gen-script",
             "gen-assets",
             "gen-storyboards",
             "qa",
+            "render-videos",
         }:
-            print(f"Wrote {first_path}")
-            print(f"Wrote {second_path}")
-            print("Model request prepared. Import a JSON response with --response-file to complete this stage.")
-            return 0
+            state = load_state(root)
+            stage_name = STAGE_BY_COMMAND[command].name
+            stage_state = next(item for item in state["stages"] if item["stage"] == stage_name)
+            if stage_state["status"] == "in_progress":
+                print(f"Wrote {first_path}")
+                print(f"Wrote {second_path}")
+                if command == "render-videos":
+                    print("Render request prepared. Import a render-result JSON with --response-file to complete this stage.")
+                else:
+                    print("Model request prepared. Import a JSON response with --response-file to complete this stage.")
+                return 0
         print(f"Wrote {first_path}")
         print(f"Wrote {second_path}")
         return 0
@@ -169,6 +202,7 @@ def make_stage_handler(command: str) -> Callable[[argparse.Namespace], int]:
 
 
 def main() -> int:
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
     handler = getattr(args, "handler")

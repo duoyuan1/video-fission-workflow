@@ -1,0 +1,2 @@
+[console_scripts]
+video-fission-workflow = workflow.cli:main
