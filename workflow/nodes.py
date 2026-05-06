@@ -302,21 +302,11 @@ def build_provider_attachments(project_root: Path, command: str, config: dict[st
         return attachments
 
     if command in {"gen-assets", "gen-storyboards"}:
-        reference_library = load_reference_library(project_root)
-        for item in reference_library["references"]:
-            source = item["source"]
-            media_type = _guess_media_type(source)
-            if media_type.startswith("image/"):
-                resolved_source = _resolve_local_media_source(project_root, source)
-                append_image(resolved_source, Path(source).name, media_type)
-
-        material_library = load_material_library(project_root)
-        for item in material_library["materials"]:
-            if item["available_for"] and command not in item["available_for"]:
-                continue
-            if item["media_type"] != "image":
-                continue
-            append_image(item["resolved_source"], item["file_name"], item["resolved_media_type"])
+        # These stages now rely on the prompt's structured asset/material summaries only.
+        # Keeping them text-only makes them compatible with providers such as DeepSeek
+        # official chat/completions, which do not currently accept image_url content items
+        # for this workflow's request format.
+        return attachments
     return attachments
 
 
@@ -783,7 +773,8 @@ def prepare_direction_planning(
 6. 保持与原视频解析一致，不要违背 must_keep 事实，不要为了凑内容新增原视频未出现的核心设定。
 7. 如果参考素材里已经有合适的猫狗 meme 角色，可以选择性使用其中 0-2 个作为角色锚点来增强识别度或喜剧感；不需要为了“用素材”而强行同时塞满猫和狗。
 8. 如果现有素材库体现出明显的《三角洲行动》战术氛围、工业据点、搜打撤或军事调度气质，应尽量维持这种世界观氛围；但除非剧情自然需要，不要机械塞入具体探员、枪械、配件、载具或地图名。
-9. 如果某个方向明显依赖现成素材，请在 `asset_usage_hint` 中简要说清它会如何选择性使用角色锚点或环境氛围。
+9. 如果决定使用现有 meme 角色，必须优先从已注册素材里选定具体原型，再在整条方向描述中保持命名稳定。例如一旦选定 `Cheems / Balltze` 或 `Smudge the Cat`，后续都应沿用该名字或明确角色名，不要中途改成别的狗/猫 meme。
+10. 如果某个方向明显依赖现成素材，请在 `asset_usage_hint` 中简要说清它会如何选择性使用角色锚点或环境氛围。
 
 ## Output requirements
 
@@ -1000,8 +991,9 @@ def prepare_script_generation(
    - 至少 8 个以 `△ ` 开头的镜头描述
 13. 情绪弧线和方向定位要一致，不要写成普通流水账。
 14. 选择性使用现有角色/素材。如果素材库里已有合适的猫狗 meme 角色，可把其中 0-2 个作为角色锚点或表情变体；如果当前方向不适合，就不要硬塞。
-15. 如果现有素材库体现出《三角洲行动》氛围，请优先保持战术办公室、工业据点、空投、搜打撤、军事调度这类整体气质；但除非剧情自然需要，不要强行点名探员、枪械、配件、载具或地图名。
-16. 必须输出 `asset_usage_strategy`，写清这条视频实际选用了哪些角色锚点、环境氛围、道具策略，以及哪些素材刻意没有用。
+15. 如果一开始选定了某个 meme 角色原型，必须在整条脚本里锁定这个选择，并明确说明角色是谁。例如可写成“主角使用 Cheems / Balltze meme dog 作为原型”“上司使用 Smudge the Cat meme 作为原型”；后文只允许继续用这个名字或稳定角色名，不要中途换成别的猫狗 meme。
+16. 如果现有素材库体现出《三角洲行动》氛围，请优先保持战术办公室、工业据点、空投、搜打撤、军事调度这类整体气质，把场景写成《三角洲行动》式战术工业场景；但除非剧情自然需要，不要强行点名探员、枪械、配件、载具或地图名。
+17. 必须输出 `asset_usage_strategy`，写清这条视频实际选用了哪些角色锚点、环境氛围、道具策略，以及哪些素材刻意没有用。
 
 ## Fictional reference example
 
@@ -1390,7 +1382,10 @@ def prepare_asset_planning(
 - `sourcing_mode` 只能是 `generate_fresh` / `generate_from_reference` / `use_reference_directly` / `use_material_library_directly`。
 - 如果使用参考素材，`reference_ids` 必须引用 External Reference Library 里的 `reference_id`。
 - `material_ids` 只能引用 Existing Material Library 里的 `material_id`。
-- `generation_prompt` 用适合图像模型的完整描述。
+- 每个 `characters[]` / `scenes[]` / `props[]` 条目都必须把所有字段填满；不要留空字符串，不要省略数组字段。
+- `reference_notes`、`visual_description`、`generation_prompt` 都必须是非空字符串。
+- 即使 `sourcing_mode = use_material_library_directly`，也必须填写 `generation_prompt`，把它当成“后续执行/复用说明 prompt”，说明这个现有素材该如何被使用、如何与整体风格保持一致。
+- `generation_prompt` 用适合图像模型或执行阶段的完整描述，至少要写清主体/场景、风格、用途或使用方式。
 - `must_generate_first` 只能引用已定义的素材 ID。
 """
     template = {
@@ -1482,6 +1477,31 @@ def finalize_asset_planning(
         "use_material_library_directly",
     }
 
+    style_prefix = _require_str(style_guide.get("style_prefix"), "style_guide.style_prefix")
+    visual_style = _require_str(style_guide.get("visual_style"), "style_guide.visual_style")
+
+    def fallback_generation_prompt(
+        *,
+        asset_id: str,
+        name: str,
+        purpose: str,
+        sourcing_mode: str,
+        material_ids: list[str],
+        reference_notes: str,
+        visual_description: str,
+    ) -> str:
+        material_hint = f" Materials: {', '.join(material_ids)}." if material_ids else ""
+        notes_hint = f" Notes: {reference_notes}." if reference_notes else ""
+        if sourcing_mode == "use_material_library_directly":
+            return (
+                f"{style_prefix} | Reuse the existing library asset for `{name}` ({asset_id}) as-is while keeping the "
+                f"overall style consistent with {visual_style}. Purpose: {purpose}. Scene/asset description: "
+                f"{visual_description}.{material_hint}{notes_hint} Use this asset as the direct base plate/reference in later generation."
+            ).strip()
+        return (
+            f"{style_prefix} | {name} ({asset_id}). Purpose: {purpose}. Visual description: {visual_description}.{notes_hint}"
+        ).strip()
+
     def normalize_assets(items: list[Any], prefix: str, path: str) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for index, item in enumerate(items):
@@ -1507,22 +1527,40 @@ def finalize_asset_planning(
                     raise NodeValidationError(f"{path}[{index}].reference_ids must not be empty for `{sourcing_mode}`.")
             if sourcing_mode == "use_material_library_directly" and not material_ids:
                 raise NodeValidationError(f"{path}[{index}].material_ids must not be empty for `{sourcing_mode}`.")
+            name = _require_str(asset.get("name"), f"{path}[{index}].name")
+            purpose = _require_str(asset.get("purpose"), f"{path}[{index}].purpose")
+            priority = _require_str(asset.get("priority"), f"{path}[{index}].priority")
+            reference_notes = _require_str(
+                asset.get("reference_notes", ""), f"{path}[{index}].reference_notes", allow_empty=True
+            )
+            visual_description = _require_str(
+                asset.get("visual_description"), f"{path}[{index}].visual_description"
+            )
+            generation_prompt = _require_str(
+                asset.get("generation_prompt", ""), f"{path}[{index}].generation_prompt", allow_empty=True
+            )
+            if not generation_prompt.strip():
+                generation_prompt = fallback_generation_prompt(
+                    asset_id=asset_id,
+                    name=name,
+                    purpose=purpose,
+                    sourcing_mode=sourcing_mode,
+                    material_ids=material_ids,
+                    reference_notes=reference_notes,
+                    visual_description=visual_description,
+                )
             normalized.append(
                 {
                     "asset_id": asset_id,
-                    "name": _require_str(asset.get("name"), f"{path}[{index}].name"),
-                    "purpose": _require_str(asset.get("purpose"), f"{path}[{index}].purpose"),
-                    "priority": _require_str(asset.get("priority"), f"{path}[{index}].priority"),
+                    "name": name,
+                    "purpose": purpose,
+                    "priority": priority,
                     "sourcing_mode": sourcing_mode,
                     "reference_ids": reference_ids,
                     "material_ids": material_ids,
-                    "reference_notes": _require_str(asset.get("reference_notes", ""), f"{path}[{index}].reference_notes", allow_empty=True),
-                    "visual_description": _require_str(
-                        asset.get("visual_description"), f"{path}[{index}].visual_description"
-                    ),
-                    "generation_prompt": _require_str(
-                        asset.get("generation_prompt"), f"{path}[{index}].generation_prompt"
-                    ),
+                    "reference_notes": reference_notes,
+                    "visual_description": visual_description,
+                    "generation_prompt": generation_prompt,
                 }
             )
         return normalized
@@ -1746,6 +1784,8 @@ def prepare_storyboard_generation(
 7. 素材引用必须只使用素材库里已定义的 ID。
 8. 如果某项素材依赖参考图，上传表里要明确写出 `reference_ids`，提醒执行时一并上传。
 9. 如果某项素材已绑定现有素材库，上传表里要明确写出 `material_ids`。
+10. 分镜里的人物命名必须沿用 script 已锁定的角色原型与名称。若脚本已选定 `Cheems / Balltze meme dog` 或 `Smudge the Cat meme`，分镜与后续 prompt 中都要保持这个身份锚点，不要换成别的猫狗 meme。
+11. 如果环境锚点指向《三角洲行动》式工业据点/战术办公室氛围，分镜 prompt 要持续体现这种场景语气与视觉语言，把场景说清楚，但不要机械堆砌官方专有名词。
 
 ## Output requirements
 
@@ -1756,6 +1796,10 @@ def prepare_storyboard_generation(
 - `generation_segments` 数量必须与 Video Plan 完全一致。
 - `generation_segments[].segment_id` 必须与 Video Plan 中的 ID 一一对应。
 - `generation_segments[].duration_seconds` 必须与 Video Plan 对应段一致，且不得超过 10。
+- 每个 `episodes[]`、`upload_slots[]`、`generation_segments[]` 条目都必须把所有字符串字段填满；不要留空字符串，不要用占位符。
+- `upload_slots[].usage` 必须明确说明该素材在整条视频里的职责。
+- 每个 `generation_segments[]` 都必须填写非空的 `purpose`、`focus_asset_ids`、`timeline_prompt`、`sound_design`、`end_frame`、`continuity_to_next`。
+- 如果某段已经是最后一段，`continuity_to_next` 也要明确写成类似“本段结束，视频在此闭环收口”，不要留空。
 - 每个 `generation_segments[].timeline_prompt` 必须是单段可执行 prompt，不要写整条视频总述。
 """
     template_segments = [
@@ -2637,14 +2681,30 @@ def prepare_qa_review(
     material_bound_asset_count = sum(
         1 for item in assets["characters"] + assets["scenes"] + assets["props"] if item.get("material_ids", [])
     )
+    segment_count = sum(len(item.get("generation_segments", [])) for item in storyboards["episodes"])
+    upload_slot_lines: list[str] = []
+    for episode in storyboards["episodes"]:
+        for slot in episode["upload_slots"]:
+            reference_ids = ", ".join(slot.get("reference_ids", [])) if slot.get("reference_ids", []) else "none"
+            material_ids = ", ".join(slot.get("material_ids", [])) if slot.get("material_ids", []) else "none"
+            upload_slot_lines.append(
+                f"- V{episode['episode_number']:02d} {slot['slot']} | asset={slot['asset_id']} | refs={reference_ids} | materials={material_ids}"
+            )
+    upload_slot_summary = "\n".join(upload_slot_lines) if upload_slot_lines else "- none"
     prompt = f"""# QA Review Request
 
-你是“AI 视频生产 QA 审查”专家。现在你需要审查整条链路是否可执行：视频解析、方向规划、裂变剧本、素材库、分镜是否一致。
+你是“AI 视频生产 QA 审查”专家。现在你需要审查整条链路是否可执行：视频解析、方向规划、裂变脚本、素材库、分镜与执行前条件是否一致。
 
 ## Project Context
 
 - Project: `{config["project_name"]}`
 - Source video: `{config["source_video"]}`
+
+## Current Workflow Mode
+
+- 这不是多集短剧流程，而是“单条独立视频”流程。
+- `storyboards.episodes` 当前允许只有 1 条视频；不要因为只有 1 条 video storyboard 就判定失败。
+- 连续性应主要检查 `generation_segments` 是否覆盖完整视频计划，而不是检查“集数是否足够”。
 
 ## Audit anchors
 
@@ -2656,14 +2716,20 @@ def prepare_qa_review(
 - Materials registered: {len(material_library["materials"])}
 - Assets depending on references: {referenced_asset_count}
 - Assets bound to existing materials: {material_bound_asset_count}
-- Storyboard episodes: {len(storyboards["episodes"])}
+- Standalone video count: {len(storyboards["episodes"])}
+- Generation segment count: {segment_count}
+
+## Known storyboard bindings
+
+这些绑定已经在 storyboards JSON 中显式存在，应视为已知事实，不要误判为“缺失引用”：
+{upload_slot_summary}
 
 ## Review goals
 
-1. 检查 must_keep 事实有没有被破坏。
+1. 检查 must_keep 事实有没有被破坏，但允许标题做轻度裂变包装；只有在核心事件被改写成另一件事时才判高风险。
 2. 检查剧本、素材、分镜之间的素材引用和叙事连贯性。
-3. 检查所有依赖参考图的素材，是否在分镜上传表中明确给出了 reference_ids。
-4. 检查所有绑定素材库的素材，是否在分镜上传表中明确给出了 material_ids。
+3. 审查素材引用时，以 storyboards JSON 里的 `upload_slots.reference_ids` / `upload_slots.material_ids` 为准；如果字段已存在且非空，不要再报告“缺失 ID”。
+4. 检查 `generation_segments` 是否覆盖单条视频计划、镜头衔接是否合理。
 5. 标出高/中/低风险问题。
 6. 给出是否可进入实际生成阶段的判断。
 
@@ -2671,7 +2737,8 @@ def prepare_qa_review(
 
 - 严格输出 JSON。
 - `overall_status` 只能是 `pass`、`needs_revision`、`fail`。
-- `checklist` 至少覆盖事实一致性、素材完整性、分镜连续性、生成可执行性。
+- `checklist` 至少覆盖事实一致性、素材完整性、分段连续性、生成可执行性。
+- 如果主要问题只是文案层轻微偏差、而素材引用与执行链路已经闭合，应优先给 `needs_revision` 或 `pass`，不要夸大为阻塞性失败。
 """
     template = {
         "overall_status": "needs_revision",
@@ -2771,6 +2838,275 @@ def finalize_qa_review(
         summary="QA review completed.",
         required_inputs=["All upstream artifacts."],
         expected_outputs=["Readiness decision and revision targets."],
+        next_stage="execution_planner",
+        payload=payload,
+    )
+    markdown = render_qa_markdown(config, payload)
+    return artifact, markdown
+
+
+def build_local_qa_review(
+    config: dict[str, Any],
+    analysis: dict[str, Any],
+    directions: dict[str, Any],
+    script: dict[str, Any],
+    assets: dict[str, Any],
+    storyboards: dict[str, Any],
+    reference_library: dict[str, Any],
+    material_library: dict[str, Any],
+) -> tuple[StageArtifact, str]:
+    findings: list[dict[str, str]] = []
+    revision_targets: list[dict[str, str]] = []
+    checklist: list[dict[str, str]] = []
+
+    reference_ids = {item["reference_id"] for item in reference_library["references"]}
+    material_ids = {item["material_id"] for item in material_library["materials"]}
+    assets_by_id = {item["asset_id"]: item for item in assets["characters"] + assets["scenes"] + assets["props"]}
+    planned_segments = script["video_plan"]["generation_segments"]
+    planned_segment_ids = [item["segment_id"] for item in planned_segments]
+    planned_total_duration = sum(int(item["duration_seconds"]) for item in planned_segments)
+
+    asset_binding_issues = 0
+    for asset in assets_by_id.values():
+        sourcing_mode = asset["sourcing_mode"]
+        asset_refs = asset.get("reference_ids", [])
+        asset_mats = asset.get("material_ids", [])
+        if sourcing_mode in {"generate_from_reference", "use_reference_directly"} and not asset_refs:
+            asset_binding_issues += 1
+            findings.append(
+                {
+                    "severity": "high",
+                    "area": "asset-binding",
+                    "issue": f"Asset {asset['asset_id']} requires reference_ids for sourcing_mode={sourcing_mode}.",
+                    "recommendation": "补全对应素材的 reference_ids 绑定。",
+                }
+            )
+        if sourcing_mode == "use_material_library_directly" and not asset_mats:
+            asset_binding_issues += 1
+            findings.append(
+                {
+                    "severity": "high",
+                    "area": "asset-binding",
+                    "issue": f"Asset {asset['asset_id']} requires material_ids for sourcing_mode={sourcing_mode}.",
+                    "recommendation": "补全对应素材的 material_ids 绑定。",
+                }
+            )
+        for reference_id in asset_refs:
+            if reference_id not in reference_ids:
+                asset_binding_issues += 1
+                findings.append(
+                    {
+                        "severity": "high",
+                        "area": "asset-binding",
+                        "issue": f"Asset {asset['asset_id']} references unknown reference_id {reference_id}.",
+                        "recommendation": "修正 reference_assets.json 或素材绑定中的 reference_id。",
+                    }
+                )
+        for material_id in asset_mats:
+            if material_id not in material_ids:
+                asset_binding_issues += 1
+                findings.append(
+                    {
+                        "severity": "high",
+                        "area": "asset-binding",
+                        "issue": f"Asset {asset['asset_id']} references unknown material_id {material_id}.",
+                        "recommendation": "修正 material_library.json 或素材绑定中的 material_id。",
+                    }
+                )
+
+    slot_binding_issues = 0
+    segment_issues = 0
+    for episode in storyboards["episodes"]:
+        for slot in episode["upload_slots"]:
+            asset_id = slot["asset_id"]
+            if asset_id not in assets_by_id:
+                slot_binding_issues += 1
+                findings.append(
+                    {
+                        "severity": "high",
+                        "area": "storyboard-binding",
+                        "issue": f"Storyboard slot {slot['slot']} references unknown asset_id {asset_id}.",
+                        "recommendation": "修正分镜 upload_slots 中的 asset_id。",
+                    }
+                )
+                continue
+            asset = assets_by_id[asset_id]
+            slot_refs = slot.get("reference_ids", [])
+            slot_mats = slot.get("material_ids", [])
+            for reference_id in slot_refs:
+                if reference_id not in reference_ids:
+                    slot_binding_issues += 1
+                    findings.append(
+                        {
+                            "severity": "high",
+                            "area": "storyboard-binding",
+                            "issue": f"Storyboard slot {slot['slot']} references unknown reference_id {reference_id}.",
+                            "recommendation": "修正分镜 upload_slots 的 reference_ids。",
+                        }
+                    )
+                if reference_id not in asset.get("reference_ids", []):
+                    slot_binding_issues += 1
+                    findings.append(
+                        {
+                            "severity": "high",
+                            "area": "storyboard-binding",
+                            "issue": f"Storyboard slot {slot['slot']} uses reference_id {reference_id} not bound to asset {asset_id}.",
+                            "recommendation": "让分镜引用仅使用该 asset 已绑定的 reference_ids。",
+                        }
+                    )
+            for material_id in slot_mats:
+                if material_id not in material_ids:
+                    slot_binding_issues += 1
+                    findings.append(
+                        {
+                            "severity": "high",
+                            "area": "storyboard-binding",
+                            "issue": f"Storyboard slot {slot['slot']} references unknown material_id {material_id}.",
+                            "recommendation": "修正分镜 upload_slots 的 material_ids。",
+                        }
+                    )
+                if material_id not in asset.get("material_ids", []):
+                    slot_binding_issues += 1
+                    findings.append(
+                        {
+                            "severity": "high",
+                            "area": "storyboard-binding",
+                            "issue": f"Storyboard slot {slot['slot']} uses material_id {material_id} not bound to asset {asset_id}.",
+                            "recommendation": "让分镜引用仅使用该 asset 已绑定的 material_ids。",
+                        }
+                    )
+            if asset["sourcing_mode"] in {"generate_from_reference", "use_reference_directly"} and not slot_refs:
+                slot_binding_issues += 1
+                findings.append(
+                    {
+                        "severity": "high",
+                        "area": "storyboard-binding",
+                        "issue": f"Storyboard slot {slot['slot']} for asset {asset_id} is missing required reference_ids.",
+                        "recommendation": "在 upload_slots 中补全 reference_ids。",
+                    }
+                )
+            if asset["sourcing_mode"] == "use_material_library_directly" and not slot_mats:
+                slot_binding_issues += 1
+                findings.append(
+                    {
+                        "severity": "high",
+                        "area": "storyboard-binding",
+                        "issue": f"Storyboard slot {slot['slot']} for asset {asset_id} is missing required material_ids.",
+                        "recommendation": "在 upload_slots 中补全 material_ids。",
+                    }
+                )
+
+        segment_ids = [segment["segment_id"] for segment in episode.get("generation_segments", [])]
+        if segment_ids != planned_segment_ids:
+            segment_issues += 1
+            findings.append(
+                {
+                    "severity": "high",
+                    "area": "segment-plan",
+                    "issue": f"Storyboard generation_segments {segment_ids} do not match script video_plan {planned_segment_ids}.",
+                    "recommendation": "让 storyboards 与 script.video_plan 使用完全一致的 segment_id 顺序。",
+                }
+            )
+        episode_total_duration = sum(int(segment["duration_seconds"]) for segment in episode.get("generation_segments", []))
+        if episode_total_duration != planned_total_duration:
+            segment_issues += 1
+            findings.append(
+                {
+                    "severity": "medium",
+                    "area": "segment-plan",
+                    "issue": f"Storyboard segment duration total {episode_total_duration}s does not match script plan {planned_total_duration}s.",
+                    "recommendation": "统一 storyboards 与 script.video_plan 的总时长。",
+                }
+            )
+
+    if asset_binding_issues == 0:
+        checklist.append(
+            {
+                "check": "asset_binding_integrity",
+                "status": "pass",
+                "details": "素材层的 reference_ids / material_ids 绑定完整，且都指向已注册 ID。",
+            }
+        )
+    else:
+        checklist.append(
+            {
+                "check": "asset_binding_integrity",
+                "status": "fail",
+                "details": f"发现 {asset_binding_issues} 个素材绑定问题。",
+            }
+        )
+        revision_targets.append({"stage": "gen-assets", "reason": "修正素材层 reference_ids / material_ids 绑定。"})
+
+    if slot_binding_issues == 0:
+        checklist.append(
+            {
+                "check": "storyboard_binding_integrity",
+                "status": "pass",
+                "details": "分镜上传表中的 asset_id / reference_ids / material_ids 与素材库绑定一致。",
+            }
+        )
+    else:
+        checklist.append(
+            {
+                "check": "storyboard_binding_integrity",
+                "status": "fail",
+                "details": f"发现 {slot_binding_issues} 个分镜绑定问题。",
+            }
+        )
+        revision_targets.append({"stage": "gen-storyboards", "reason": "修正 upload_slots 中的 asset_id / reference_ids / material_ids。"})
+
+    if segment_issues == 0:
+        checklist.append(
+            {
+                "check": "segment_plan_integrity",
+                "status": "pass",
+                "details": "单条视频的 generation_segments 与 script.video_plan 一致。",
+            }
+        )
+    else:
+        checklist.append(
+            {
+                "check": "segment_plan_integrity",
+                "status": "fail",
+                "details": f"发现 {segment_issues} 个 generation_segments 结构问题。",
+            }
+        )
+        revision_targets.append({"stage": "gen-storyboards", "reason": "让 generation_segments 与 script.video_plan 完全对齐。"})
+
+    ready_for_generation = asset_binding_issues == 0 and slot_binding_issues == 0 and segment_issues == 0
+    overall_status = "pass" if ready_for_generation else "needs_revision"
+    summary = (
+        "本地交叉校验通过：素材绑定、分镜引用和分段计划均已闭合，可进入执行层。"
+        if ready_for_generation
+        else "本地交叉校验发现阻塞项：请先修正素材绑定、分镜引用或分段计划不一致问题。"
+    )
+
+    payload = {
+        "overall_status": overall_status,
+        "summary": summary,
+        "ready_for_generation": ready_for_generation,
+        "audit_anchor": {
+            "working_title": analysis["source_overview"]["working_title"],
+            "direction_id": directions["selected_direction_id"],
+            "series_title": script["series_title"],
+            "asset_count": len(assets["characters"]) + len(assets["scenes"]) + len(assets["props"]),
+            "reference_asset_count": len(reference_library["references"]),
+            "material_library_count": len(material_library["materials"]),
+            "storyboard_episode_count": len(storyboards["episodes"]),
+            "generation_segment_count": sum(len(item.get("generation_segments", [])) for item in storyboards["episodes"]),
+        },
+        "checklist": checklist,
+        "findings": findings,
+        "revision_targets": revision_targets,
+    }
+
+    artifact = StageArtifact(
+        stage="qa_reviewer",
+        generated_at=utc_now(),
+        status="completed",
+        summary="Local QA cross-check completed.",
+        required_inputs=["All upstream artifacts."],
+        expected_outputs=["Readiness decision from local structural validation."],
         next_stage="execution_planner",
         payload=payload,
     )

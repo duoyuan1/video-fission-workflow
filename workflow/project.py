@@ -11,7 +11,11 @@ from workflow.nodes import (
     build_provider_attachments,
     build_render_request_files,
     build_execution_plan,
+    build_local_qa_review,
     finalize_response,
+    load_artifact_payload,
+    load_material_library,
+    load_reference_library,
     prepare_request,
     render_execution_episode_markdown,
     render_storyboard_episode_markdown,
@@ -255,64 +259,106 @@ def run_stage(
         save_state(root, state)
         return json_path, markdown_path
 
-    if command in {"analyze", "plan-directions", "gen-script", "gen-assets", "gen-storyboards", "qa", "render-videos"}:
+    if command == "qa":
+        try:
+            analysis = load_artifact_payload(root, "video_analyzer")
+            directions = load_artifact_payload(root, "direction_planner")
+            script = load_artifact_payload(root, "script_generator")
+            assets = load_artifact_payload(root, "asset_planner")
+            storyboards = load_artifact_payload(root, "storyboard_generator")
+            reference_library = load_reference_library(root)
+            material_library = load_material_library(root)
+            artifact, markdown = build_local_qa_review(
+                config, analysis, directions, script, assets, storyboards, reference_library, material_library
+            )
+        except (NodeValidationError, SourceInputError) as exc:
+            raise WorkflowError(str(exc)) from exc
+
+        write_json(json_path, artifact.to_dict())
+        markdown_path.write_text(markdown, encoding="utf-8")
+
+        stage_state = state["stages"][current_index]
+        stage_state["status"] = "completed"
+        stage_state["last_run_at"] = artifact.generated_at
+        stage_state["json_output"] = str(json_path)
+        stage_state["markdown_output"] = str(markdown_path)
+        stage_state["note"] = "Stage completed from local structural QA validation."
+        state["current_stage"] = next_stage or stage.name
+        save_state(root, state)
+        return json_path, markdown_path
+
+    if command == "render-videos":
         try:
             if response_file is not None and model is not None:
                 raise WorkflowError("Use either --response-file or --model, not both.")
             if response_file is None:
                 request_path, template_path = prepare_request(root, command, config, direction_id=direction_id)
-                if command == "render-videos":
-                    build_render_request_files(root, config)
-                    render_settings = resolve_render_provider_settings(
-                        model=model,
-                        api_base=api_base,
-                        api_key=api_key,
-                        timeout_seconds=timeout_seconds,
-                        config=config,
-                    )
-                    if render_settings is None:
-                        stage_state = state["stages"][current_index]
-                        stage_state["status"] = "in_progress"
-                        stage_state["last_run_at"] = utc_now()
-                        stage_state["note"] = "Render request package prepared. Import a render-result JSON manifest to complete this stage."
-                        save_state(root, state)
-                        return (request_path, template_path)
-                    execution_plan = read_json(root / "outputs" / "07_execution_plan" / "execution_plan.json")["payload"]
-                    existing_payload = None
-                    if json_path.exists():
-                        try:
-                            existing_artifact = read_json(json_path)
-                            existing_payload = existing_artifact.get("payload")
-                        except Exception:
-                            existing_payload = None
-                    provider_response, response = render_videos_via_provider(
-                        project_root=root,
-                        config=config,
-                        execution_plan=execution_plan,
-                        settings=render_settings,
-                        existing_payload=existing_payload if isinstance(existing_payload, dict) else None,
-                    )
-                    provider_response_path = root / "outputs" / stage.output_dir / PROVIDER_RESPONSE_FILE
-                    write_provider_response(provider_response_path, provider_response)
-                    artifact, markdown = finalize_response(root, command, config, response, direction_id=direction_id)
-                    write_json(json_path, artifact.to_dict())
-                    markdown_path.write_text(markdown, encoding="utf-8")
-                    raw_response_path = root / "outputs" / stage.output_dir / RAW_RESPONSE_FILE
-                    write_json(raw_response_path, response)
-
+                build_render_request_files(root, config)
+                render_settings = resolve_render_provider_settings(
+                    model=model,
+                    api_base=api_base,
+                    api_key=api_key,
+                    timeout_seconds=timeout_seconds,
+                    config=config,
+                )
+                if render_settings is None:
                     stage_state = state["stages"][current_index]
-                    stage_state["status"] = artifact.status
-                    stage_state["last_run_at"] = artifact.generated_at
-                    stage_state["json_output"] = str(json_path)
-                    stage_state["markdown_output"] = str(markdown_path)
-                    if artifact.status == "completed":
-                        stage_state["note"] = "Render manifest imported and normalized."
-                        state["current_stage"] = next_stage or stage.name
-                    else:
-                        stage_state["note"] = "Render tasks submitted. Re-run `render-videos` to continue polling."
-                        state["current_stage"] = stage.name
+                    stage_state["status"] = "in_progress"
+                    stage_state["last_run_at"] = utc_now()
+                    stage_state["note"] = "Render request package prepared. Import a render-result JSON manifest to complete this stage."
                     save_state(root, state)
-                    return json_path, markdown_path
+                    return (request_path, template_path)
+                execution_plan = read_json(root / "outputs" / "07_execution_plan" / "execution_plan.json")["payload"]
+                existing_payload = None
+                if json_path.exists():
+                    try:
+                        existing_artifact = read_json(json_path)
+                        existing_payload = existing_artifact.get("payload")
+                    except Exception:
+                        existing_payload = None
+                provider_response, response = render_videos_via_provider(
+                    project_root=root,
+                    config=config,
+                    execution_plan=execution_plan,
+                    settings=render_settings,
+                    existing_payload=existing_payload if isinstance(existing_payload, dict) else None,
+                )
+                provider_response_path = root / "outputs" / stage.output_dir / PROVIDER_RESPONSE_FILE
+                write_provider_response(provider_response_path, provider_response)
+            else:
+                response = load_response_file(response_file)
+
+            artifact, markdown = finalize_response(root, command, config, response, direction_id=direction_id)
+        except (NodeValidationError, SourceInputError) as exc:
+            raise WorkflowError(str(exc)) from exc
+        except ProviderError as exc:
+            raise WorkflowError(str(exc)) from exc
+
+        write_json(json_path, artifact.to_dict())
+        markdown_path.write_text(markdown, encoding="utf-8")
+        raw_response_path = root / "outputs" / stage.output_dir / RAW_RESPONSE_FILE
+        write_json(raw_response_path, response)
+
+        stage_state = state["stages"][current_index]
+        stage_state["status"] = artifact.status
+        stage_state["last_run_at"] = artifact.generated_at
+        stage_state["json_output"] = str(json_path)
+        stage_state["markdown_output"] = str(markdown_path)
+        if artifact.status == "completed":
+            stage_state["note"] = "Render manifest imported and normalized."
+            state["current_stage"] = next_stage or stage.name
+        else:
+            stage_state["note"] = "Render tasks submitted. Re-run `render-videos` to continue polling."
+            state["current_stage"] = stage.name
+        save_state(root, state)
+        return json_path, markdown_path
+
+    if command in {"analyze", "plan-directions", "gen-script", "gen-assets", "gen-storyboards"}:
+        try:
+            if response_file is not None and model is not None:
+                raise WorkflowError("Use either --response-file or --model, not both.")
+            if response_file is None:
+                request_path, template_path = prepare_request(root, command, config, direction_id=direction_id)
                 settings = resolve_provider_settings(
                     command=command,
                     model=model,

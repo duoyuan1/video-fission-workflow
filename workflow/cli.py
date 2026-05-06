@@ -35,6 +35,19 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("project_name", help="Project name or slug.")
     status_parser.set_defaults(handler=handle_status)
 
+    run_all_parser = subparsers.add_parser("run-all", help="Run the full workflow chain, skipping already-completed stages by default.")
+    run_all_parser.add_argument("project_name", help="Project name or slug.")
+    run_all_parser.add_argument(
+        "--direction-id",
+        help="Optional direction ID to use when running gen-script. Defaults to the recommended direction from plan-directions.",
+    )
+    run_all_parser.add_argument(
+        "--rerun-completed",
+        action="store_true",
+        help="Re-run completed stages instead of skipping them.",
+    )
+    run_all_parser.set_defaults(handler=handle_run_all)
+
     for stage in STAGES:
         stage_parser = subparsers.add_parser(stage.command, help=stage.description)
         stage_parser.add_argument("project_name", help="Project name or slug.")
@@ -148,6 +161,38 @@ def handle_init(args: argparse.Namespace) -> int:
 def handle_status(args: argparse.Namespace) -> int:
     root = project_path(args.project_name)
     print(status_table(root))
+    return 0
+
+
+def handle_run_all(args: argparse.Namespace) -> int:
+    root = project_path(args.project_name)
+    rerun_completed = bool(getattr(args, "rerun_completed", False))
+    direction_id = getattr(args, "direction_id", None)
+
+    for stage in STAGES:
+        state = load_state(root)
+        stage_state = next(item for item in state["stages"] if item["stage"] == stage.name)
+        status = stage_state.get("status", "")
+
+        if status == "completed" and not rerun_completed:
+            print(f"Skipping {stage.command} (already completed)")
+            continue
+
+        stage_direction_id = direction_id if stage.command == "gen-script" else None
+        first_path, second_path = run_stage(
+            root,
+            stage.command,
+            direction_id=stage_direction_id,
+        )
+        print(f"Wrote {first_path}")
+        print(f"Wrote {second_path}")
+
+        state = load_state(root)
+        stage_state = next(item for item in state["stages"] if item["stage"] == stage.name)
+        if stage_state.get("status") == "in_progress":
+            print(f"Stopped at {stage.command}: {stage_state.get('note', 'Stage is still in progress.')}")
+            return 0
+
     return 0
 
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlparse
 
 from workflow.provider import (
     ProviderAttachment,
@@ -76,7 +79,7 @@ def resolve_render_provider_settings(
 
     auth_scheme = stage_settings["auth_scheme"] or os.getenv("RENDER_AUTH_SCHEME", "")
     if "yunwu.ai" in resolved_base:
-        auth_scheme = auth_scheme or os.getenv("YUNWU_AUTH_SCHEME", "raw")
+        auth_scheme = auth_scheme or os.getenv("YUNWU_AUTH_SCHEME", "bearer")
     auth_scheme = normalize_auth_scheme(auth_scheme or "bearer")
 
     create_path = os.getenv("RENDER_CREATE_PATH", "/v1/videos")
@@ -206,6 +209,8 @@ def render_videos_via_provider(
             if pending_task_ids and poll_index + 1 < settings.max_polls:
                 time.sleep(settings.poll_seconds)
 
+    materialize_render_outputs(project_root, episodes, timeout_seconds=settings.timeout_seconds)
+
     if any(item["status"] in NON_TERMINAL_STATUSES for item in episodes):
         for item in episodes:
             if item["status"] in NON_TERMINAL_STATUSES:
@@ -239,7 +244,9 @@ def build_render_submission_payload(
     segment: dict[str, Any],
     settings: RenderProviderSettings,
 ) -> dict[str, Any]:
+    prompt_prefix = build_render_prompt_prefix(segment.get("resolved_inputs", []))
     prompt_lines = [
+        prompt_prefix,
         f"Segment: {segment['segment_id']} ({segment['duration_seconds']}s)",
         f"Purpose: {segment['purpose']}",
         f"Coverage: {segment['coverage']}",
@@ -252,12 +259,12 @@ def build_render_submission_payload(
     if segment.get("continuity_to_next"):
         prompt_lines.append(f"Continuity to next: {segment['continuity_to_next']}")
     prompt = "\n".join(line for line in prompt_lines if line).strip()
-    image_urls = collect_render_image_urls(project_root, segment.get("resolved_inputs", []), max_images=settings.max_images)
+    prompt = f"{prompt} --dur {segment['duration_seconds']}".strip()
+    image_roles = collect_render_image_roles(project_root, episode, segment)
 
     payload: dict[str, Any] = {
         "model": settings.model,
         "aspect_ratio": config["aspect_ratio"],
-        "duration": str(segment["duration_seconds"]),
         "generate_audio": settings.generate_audio,
     }
     if settings.resolution:
@@ -267,43 +274,139 @@ def build_render_submission_payload(
 
     if settings.request_format == "content":
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for url in image_urls:
-            content.append({"type": "image_url", "image_url": {"url": url}})
+        if image_roles.get("first_frame"):
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_roles["first_frame"]},
+                    "role": "first_frame",
+                }
+            )
+        if image_roles.get("last_frame"):
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_roles["last_frame"]},
+                    "role": "last_frame",
+                }
+            )
         payload["content"] = content
     else:
         payload["prompt"] = prompt
-        if image_urls:
-            payload["image_urls"] = image_urls
+        ordered_urls = [url for url in [image_roles.get("first_frame"), image_roles.get("last_frame")] if url]
+        if ordered_urls:
+            payload["image_urls"] = ordered_urls
     return payload
 
 
-def collect_render_image_urls(project_root: Path, resolved_inputs: list[dict[str, Any]], *, max_images: int) -> list[str]:
-    urls: list[str] = []
-    for input_item in resolved_inputs:
-        for source_file in input_item["source_files"]:
-            resolved_source = resolve_render_media_source(
-                project_root,
-                source_file.get("resolved_source") or source_file.get("source", ""),
-            )
+def build_render_prompt_prefix(resolved_inputs: list[dict[str, Any]]) -> str:
+    lines = [
+        "Visual style anchor: Keep a Delta Force-style tactical industrial scene and atmosphere, with extraction-mission tension, industrial stronghold or tactical office staging, hard military camera language, and restrained game-world seriousness mixed with absurd comedy. Preserve the scene and mood; do not force official operator names, gun names, map names, or UI unless already required by the prompt.",
+    ]
+    meme_roles = detect_meme_role_anchors(resolved_inputs)
+    if meme_roles:
+        lines.append("Character identity lock:")
+        lines.extend(f"- {item}" for item in meme_roles)
+        lines.append(
+            "Use these meme identities consistently across the segment. Once selected, keep the same names or stable role names; do not swap to other dog/cat memes mid-generation."
+        )
+    return "\n".join(lines).strip()
 
-            mime_type = guess_media_type(resolved_source)
-            if not mime_type.startswith("image/"):
-                continue
-            try:
-                url = attachment_to_url(
-                    ProviderAttachment(
-                        kind="image",
-                        source=resolved_source,
-                        name=Path(source_file.get("source", resolved_source)).name,
-                        mime_type=mime_type,
-                    )
+
+def detect_meme_role_anchors(resolved_inputs: list[dict[str, Any]]) -> list[str]:
+    anchors: list[str] = []
+    saw_cheems = False
+    saw_smudge = False
+    for input_item in resolved_inputs:
+        asset_name = str(input_item.get("asset_name", "")).lower()
+        role_hint = "character" if str(input_item.get("asset_id", "")).startswith("C") else "supporting scene"
+        for source_file in input_item.get("source_files", []):
+            source_id = str(source_file.get("source_id", "")).upper()
+            source_name = str(source_file.get("name", "")).lower()
+            if not saw_cheems and ("CHEEMS" in source_id or "balltze" in source_name or "cheems" in source_name):
+                anchors.append(
+                    f"{input_item.get('asset_name', 'Character')} uses the Cheems / Balltze meme dog identity as the visual and performance anchor ({role_hint})."
                 )
-            except ProviderError:
-                continue
-            urls.append(url)
-            if len(urls) >= max_images:
-                return urls
-    return urls
+                saw_cheems = True
+            if not saw_smudge and ("SMUDGE" in source_id or "smudge" in source_name):
+                anchors.append(
+                    f"{input_item.get('asset_name', 'Character')} uses the Smudge the Cat meme identity as the visual and performance anchor ({role_hint})."
+                )
+                saw_smudge = True
+        if "cheems" in asset_name and not saw_cheems:
+            anchors.append(
+                f"{input_item.get('asset_name', 'Character')} should read as a Cheems / Balltze meme dog character and keep that identity stable."
+            )
+            saw_cheems = True
+        if "smudge" in asset_name and not saw_smudge:
+            anchors.append(
+                f"{input_item.get('asset_name', 'Character')} should read as a Smudge the Cat meme character and keep that identity stable."
+            )
+            saw_smudge = True
+    return anchors
+
+
+def collect_render_image_roles(
+    project_root: Path, episode: dict[str, Any], segment: dict[str, Any]
+) -> dict[str, str]:
+    current_inputs = segment.get("resolved_inputs", [])
+    first_frame = first_image_url_for_asset_prefix(project_root, current_inputs, "C")
+
+    next_segment = next_generation_segment(episode, str(segment.get("segment_id", "")))
+    last_frame = ""
+    if next_segment is not None:
+        last_frame = first_image_url_for_asset_prefix(
+            project_root,
+            next_segment.get("resolved_inputs", []),
+            "S",
+        )
+
+    if first_frame and last_frame and first_frame == last_frame:
+        last_frame = ""
+    return {"first_frame": first_frame, "last_frame": last_frame}
+
+
+def next_generation_segment(episode: dict[str, Any], current_segment_id: str) -> dict[str, Any] | None:
+    segments = episode.get("generation_segments", [])
+    for index, item in enumerate(segments):
+        if str(item.get("segment_id", "")) == current_segment_id:
+            return segments[index + 1] if index + 1 < len(segments) else None
+    return None
+
+
+def first_image_url_for_asset_prefix(
+    project_root: Path, resolved_inputs: list[dict[str, Any]], asset_prefix: str
+) -> str:
+    for input_item in resolved_inputs:
+        asset_id = str(input_item.get("asset_id", ""))
+        if asset_id.startswith(asset_prefix):
+            image_url = first_image_url_from_input(project_root, input_item)
+            if image_url:
+                return image_url
+    return ""
+
+
+def first_image_url_from_input(project_root: Path, input_item: dict[str, Any]) -> str:
+    for source_file in input_item["source_files"]:
+        resolved_source = resolve_render_media_source(
+            project_root,
+            source_file.get("resolved_source") or source_file.get("source", ""),
+        )
+        mime_type = guess_media_type(resolved_source)
+        if not mime_type.startswith("image/"):
+            continue
+        try:
+            return attachment_to_url(
+                ProviderAttachment(
+                    kind="image",
+                    source=resolved_source,
+                    name=Path(source_file.get("source", resolved_source)).name,
+                    mime_type=mime_type,
+                )
+            )
+        except ProviderError:
+            continue
+    return ""
 
 
 def build_skipped_episode_result(config: dict[str, Any], episode: dict[str, Any]) -> dict[str, Any]:
@@ -451,6 +554,131 @@ def build_pending_segment_ids(episodes: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def materialize_render_outputs(project_root: Path, episodes: list[dict[str, Any]], *, timeout_seconds: int) -> None:
+    segments_dir = project_root / "outputs" / "08_video_generation" / "segments"
+    final_dir = project_root / "outputs" / "08_video_generation" / "final"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_path = shutil.which("ffmpeg")
+
+    for episode in episodes:
+        local_segment_paths: list[Path] = []
+        for segment in episode.get("segments", []):
+            if segment.get("status") != "completed" or not segment.get("output_video"):
+                continue
+            output_video = str(segment["output_video"])
+            if output_video.startswith(("http://", "https://")):
+                target_path = build_segment_output_path(
+                    segments_dir=segments_dir,
+                    episode_number=int(episode["episode_number"]),
+                    segment_id=str(segment["segment_id"]),
+                    source_url=output_video,
+                )
+                try:
+                    download_remote_video(output_video, target_path, timeout_seconds=timeout_seconds)
+                    relative_path = relativize_project_path(project_root, target_path)
+                    segment["output_video"] = relative_path
+                    segment["notes"] = append_note(segment.get("notes", ""), f"Downloaded segment clip to {relative_path}.")
+                    output_video = relative_path
+                except ProviderError as exc:
+                    segment["notes"] = append_note(
+                        segment.get("notes", ""),
+                        f"Automatic download skipped: {exc}",
+                    )
+            if output_video and not output_video.startswith(("http://", "https://")):
+                local_path = resolve_existing_local_output(project_root, output_video)
+                if local_path:
+                    local_segment_paths.append(local_path)
+
+        update_episode_from_segments(episode)
+        completed_segments = [item for item in episode.get("segments", []) if item.get("status") == "completed"]
+        if len(completed_segments) < 2 or len(local_segment_paths) < 2 or episode.get("status") != "completed":
+            continue
+        if not ffmpeg_path:
+            episode["notes"] = append_note(
+                episode.get("notes", ""),
+                "All segment clips were downloaded, but ffmpeg is not installed so local stitching was skipped.",
+            )
+            continue
+        stitched_output = final_dir / f"V{int(episode['episode_number']):02d}.mp4"
+        try:
+            stitch_segment_videos(local_segment_paths, stitched_output, ffmpeg_path=ffmpeg_path)
+            relative_output = relativize_project_path(project_root, stitched_output)
+            episode["output_video"] = relative_output
+            episode["notes"] = append_note(
+                episode.get("notes", ""),
+                f"Stitched {len(local_segment_paths)} segment clips into {relative_output}.",
+            )
+        except ProviderError as exc:
+            episode["notes"] = append_note(
+                episode.get("notes", ""),
+                f"Local stitching skipped: {exc}",
+            )
+
+
+def build_segment_output_path(*, segments_dir: Path, episode_number: int, segment_id: str, source_url: str) -> Path:
+    suffix = Path(urlparse(source_url).path).suffix or ".mp4"
+    return segments_dir / f"V{episode_number:02d}_{segment_id}{suffix}"
+
+
+def download_remote_video(source_url: str, target_path: Path, *, timeout_seconds: int) -> None:
+    req = request.Request(source_url, method="GET")
+    try:
+        with request.urlopen(req, timeout=timeout_seconds) as resp:
+            data = resp.read()
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ProviderError(f"video download returned HTTP {exc.code}: {body}") from exc
+    except error.URLError as exc:
+        raise ProviderError(f"video download failed: {exc.reason}") from exc
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(data)
+
+
+def resolve_existing_local_output(project_root: Path, output_video: str) -> Path | None:
+    path = Path(output_video)
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    else:
+        path = path.resolve()
+    if path.exists() and path.is_file():
+        return path
+    return None
+
+
+def relativize_project_path(project_root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(project_root.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def stitch_segment_videos(segment_paths: list[Path], output_path: Path, *, ffmpeg_path: str) -> None:
+    concat_manifest = output_path.with_suffix(".segments.txt")
+    concat_lines = []
+    for segment_path in segment_paths:
+        escaped = str(segment_path).replace("'", r"'\\''")
+        concat_lines.append(f"file '{escaped}'")
+    concat_manifest.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_manifest),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    completed = subprocess.run(cmd, capture_output=True, text=True)
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown ffmpeg error"
+        raise ProviderError(f"ffmpeg concat failed: {stderr}")
+
+
 def payload_has_segment_results(payload: dict[str, Any]) -> bool:
     episodes = payload.get("episodes", [])
     return any(isinstance(item, dict) and isinstance(item.get("segments"), list) for item in episodes)
@@ -531,8 +759,18 @@ def extract_output_video(data: dict[str, Any]) -> str:
     output = next((item for item in candidates if isinstance(item, str) and item.strip()), "")
     if output:
         return output
+    content = data.get("content")
+    if isinstance(content, dict):
+        nested = first_candidate(content, ["url", "video_url", "output_video"])
+        if isinstance(nested, str):
+            return nested
     data_block = data.get("data")
     if isinstance(data_block, dict):
+        content = data_block.get("content")
+        if isinstance(content, dict):
+            nested = first_candidate(content, ["url", "video_url", "output_video"])
+            if isinstance(nested, str):
+                return nested
         video = data_block.get("video")
         if isinstance(video, dict):
             nested = first_candidate(video, ["url", "video_url", "output_video"])
